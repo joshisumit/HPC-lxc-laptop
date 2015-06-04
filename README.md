@@ -1,4 +1,4 @@
-#HPC-lxc-laptop #
+#Rapid HPC #
 
 This script is used for rapidly creating HPC cluster using LXC on your laptop.
 
