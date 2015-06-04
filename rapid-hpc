@@ -1,4 +1,5 @@
-#Create HPC Cluster With LXC
+#!/bin/bash
+#Rapidly create HPC Cluster With LXC
 #Description: This script can be useful for creating HPC Cluster on the fly.
 #It uses LXC,libvirt.
 #Author : Sumit Joshi 
