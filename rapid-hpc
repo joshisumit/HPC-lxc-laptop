@@ -1,5 +1,6 @@
 #!/bin/bash
-#Rapidly create HPC Cluster With LXC
+
+#Create HPC Cluster With LXC
 #Description: This script can be useful for creating HPC Cluster on the fly.
 #It uses LXC,libvirt.
 #Author : Sumit Joshi 
@@ -7,108 +8,273 @@
 #
 #
 ###Pre-Requisite for this script
-#1)base.xml file
-#2)Master node and compute node Filesystem 
-#3)LXC template for master node and compue node
 
 
 
+function ownerr
+{
+	echo $@
+	exit
+}
 
-#################################MPI Master Node Creation#################################
-path=/var/lib/lxc/master/rootfs
+function check_root
+{
+	sudo -v 2>/dev/null || ownerr "This script requires sudo privileges"
+}
 
-#creates master node filesystem in $path
-lxc-create -t mpi-master -n master
-echo "Master node filesystem created successfully"
-echo ""
+function install_pkg
+{
+	pkg_name="lxc libvirt-bin"
+	
+	for pkg in $pkg_name;do
+		hash $pkg &> /dev/null
+		if [ $? -ne 0 ];then
+			echo "$pkg is not installed"
+			echo "##"
+			echo "# $pkg will be installed."
+			echo "##"
+			
+			#sudo apt-get update || ownerr "Failed to update cache."
+			sudo apt-get -y install $pkg || ownerr "Failed to install $pkg"
+		else
+			echo "$pkg is already installed"
+			echo 
+			echo
+		fi
+	done
+}
 
-#preapre xml of container
-cp base.xml master.xml
-sed -i "s/NAME/master/" master.xml
-sed -i "s<ROOT<$path<" master.xml
+function download_fs
+{
+	#Download 5 things from gdrive
 
-#Define xml for master node
-virsh -c lxc:/// define master.xml
-echo "Master node domain defined successfully"
-echo ""
+	echo
+	echo "Downloading XML, Filesystem & LXC templates...."
+	echo
+	#1)dwnld base.xml in $PWD
+	if [ ! -s $PWD/base.xml ];then
+		sudo wget --no-check-certificate 'https://googledrive.com/host/0B6LOfkglrOq9bWZaazQzNkFLMEU' -O $PWD/base.xml || ownerr "Failed to download xml"
+	else
+		echo "Base.xml is already there"
+	fi
+	#2)dwnld MPI MAster filsystem in /var/cache/lxc
+	if [ ! -s /var/cache/lxc/mpi-master-fs.tar.bz2 ];then
+		echo 
+		echo "Master Node FS not found in cache. Downloading....."
+		echo
+		sudo wget --no-check-certificate --tries=2 -c 'https://googledrive.com/host/0B6LOfkglrOq9dkJxeHIwNkF6M3M' -O /var/cache/lxc/mpi-master-fs.tar.bz2 || ownerr "Failed to download master FS"
+	else
+		echo
+		echo "Master Node FS is already in cache..."
+		echo
+	fi
 
-#start the container
-virsh -c lxc:/// start master
-echo "Container master started"
-echo ""
+	#3)dwnld MPI worker filesystem in /var/cache/lxc
+	if [ ! -s "/var/cache/lxc/mpi-worker-fs.tar.bz2" ];then
+        	echo 
+                echo "Worker Node FS not found in cache. Downloading....."
+                echo
+		sudo wget --no-check-certificate --tries=2 -c 'https://googledrive.com/host/0B6LOfkglrOq9TVNKaEJzWVFkSFU' -O /var/cache/lxc/mpi-worker-fs.tar.bz2 || ownerr "Failed to download worker FS"
+	else
+                echo
+                echo "Worker Node FS is already in cache..."
+                echo
+        fi
 
-#list current containers
-virsh -c lxc:/// list --all
-sleep 13
+	#4)dwld LXC Master template in /usr/share/lxc/templates
+	#sudo mkdir -p /usr/share/lxc/templates
+	if [ ! -s /usr/lib/lxc/templates/lxc-mpi-master ];then
+		sudo wget --no-check-certificate -c 'https://googledrive.com/host/0B6LOfkglrOq9RHIwN05OeGdBbUE' -O /usr/lib/lxc/templates/lxc-mpi-master || ownerr "Failed to download lxc master template"
+		sudo chmod 755 /usr/lib/lxc/templates/lxc-mpi-master
+	fi
+	#5)dwnld LXC MPI worker in /usr/lib/lxc/templates
+	if [ ! -s /usr/lib/lxc/templates/lxc-mpi-worker ];then
+		sudo wget --no-check-certificate -c 'https://googledrive.com/host/0B6LOfkglrOq9Z0dYOFJoRWtKUk0' -O /usr/lib/lxc/templates/lxc-mpi-worker || ownerr "Failed to download lxc worker template"
+		sudo chmod 755 /usr/lib/lxc/templates/lxc-mpi-worker
+	fi
 
-#Find IP of master node container - using master node filesystem
-ip=$(tail -n15 $path/var/lib/dhcp/dhclient.eth0.leases | grep fixed-address | cut -d" " -f4 | cut -d";" -f1)
-echo "IP of master node is $ip"
-#Find the IP of container - using dnsmasq
-#ip=$(cat $path/var/lib/libvirt/dnsmasq/default.leases | grep $2 |cut -d" " -f3)
-#echo $ip
+	#Extarct filesystem
+	echo
+	echo
+	if [ ! -d "/var/cache/lxc/mpmaster/" ];then
+		echo
+        	echo "Extracting  master filesystem..."
+        	echo
+		sudo tar -xjf /var/cache/lxc/mpi-master-fs.tar.bz2 -C /var/cache/lxc || ownerr "Failed to extract master node fs"
+	fi
+
+	if [ ! -d "/var/cache/lxc/mpworker/" ];then
+		echo
+                echo "Extracting worker filesystem..."
+                echo
+		sudo tar -xjf /var/cache/lxc/mpi-worker-fs.tar.bz2 -C /var/cache/lxc || ownerr "Failed to extract worker node fs"
+	fi
+}
 
 
-#Creating array which maintains list of host and IP address
-nodes=();
-nodes=("${nodes[@]}" "$ip" "master")
-echo ${nodes[@]}
+function create_mpi_master
+{
+	fs_path=$1
+	
+	echo
+	echo "Creating Master node...."
+	echo
 
+	if [ -s "/usr/lib/lxc/templates/lxc-mpi-master" ] && [ -d "/var/cache/lxc/mpmaster" ];then
+		#creates master node filesystem in $fs_path
+		echo
+		echo "1. Creating Master node filesystem...."
+		sudo lxc-create -t mpi-master -n master || ownerr "Failed to create LXC FS"
+	else
+		ownerr "File system or LXC template does not exists"
+	fi
 
-# file maintained in host os.
-echo "$ip master" >> hosts
+	#preapre xml of container --assumes we are working in $PWD which has base.xml
+	echo
+	echo "2. Copying base.xml...."
+	sudo cp base.xml master.xml || ownerr "Failed to copy base.xml"
+	sudo sed -i "s/NAME/master/" master.xml
+	sudo sed -i "s<ROOT<$fs_path<" master.xml
 
+	#Define xml for master node
+	echo
+	echo "3. Defining master domain with virsh...."
+	virsh -c lxc:/// define master.xml || ownerr "failed to create master domain"
+	echo 
 
-#######################################MPI Worker Node Creation ###################################
-
-# No. of compute nodes you want to create
-# Change it according your requirement
-no=3
-
-for ((i=1;i<=$no;i++))
-do
-	#echo "creating $compute-$i"
-	host_name=compute-$i
-	echo "Creating $host_name"
-	echo ""
-
-        path=/var/lib/lxc/$host_name/rootfs
-
-	#create compute node filesystem
-	lxc-create -t mpi-worker -n $host_name
-
-        #preapre xml of container
-	cp base.xml $host_name.xml
-	sed -i "s/NAME/$host_name/" $host_name.xml
-	sed -i "s<ROOT<$path<" $host_name.xml
-
-        #Define xml for compute node
-	virsh -c lxc:/// define $host_name.xml
-
-	#List current containers
+	#start the container
+	echo
+	echo "4. Starting master container....."
+	if [ -d /var/lib/lxc/master ];then 
+		virsh -c lxc:/// start master || ownerr "failed to start \'master\' conatainer"
+	else
+		ownerr "No FS for master node in /var/lib/lxc"
+	fi
+	#list current containers
+	echo
+	echo "Cureently running containers...."
 	virsh -c lxc:/// list --all
 	sleep 13
+
+	#Find IP of master node container - using master node filesystem -In bridge mode
+	#ip=$(tail -n15 $fs_path/var/lib/dhcp/dhclient.eth0.leases | grep fixed-address | cut -d" " -f4 | cut -d";" -f1)
+	#echo "IP of master node is $ip"
+	#Find the IP of container - using dnsmasq
+	#ip=$(cat /var/lib/libvirt/dnsmasq/default.leases | grep $2 |cut -d" " -f3)
+	ip=$(cat /var/lib/libvirt/dnsmasq/default.leases | grep master | awk '{print $3}')
+	echo "IP of master node is $ip"
+
+	#Creating array which maintains list of host and IP address
+	nodes=();
+	nodes=("${nodes[@]}" "$ip" "master")
+	echo "array is ${nodes[@]}"
+
+	# file maintained in host os.
+	echo "$ip master" >> hosts
+
+}
+
+function create_mpi_worker
+{
+	# No. of compute nodes you want to create
+	# Change it according your requirement
+	no=3
 	
-	#Find IP of compute node	
-	ip=$(tail -n15 $path/var/lib/dhcp/dhclient.eth0.leases | grep fixed-address | cut -d" " -f4 | cut -d";" -f1)
-	echo "IP of $host_name is $ip"
+	if [ -f /usr/lib/lxc/templates/lxc-mpi-worker ] && [ -d /var/cache/lxc/mpworker ];then
+                echo
+                echo "Worker node FS exist"
+        else
+                ownerr "Worker node File system or LXC template does not exists"
+        fi
 
-	#Find the IP of container
-        #ip=`cat /var/lib/libvirt/dnsmasq/default.leases | grep $2 |cut -d" " -f3`
-        #echo $ip
+	for ((i=1;i<=$no;i++))
+	do
+        	echo "creating $compute-$i"
+        	host_name=compute-$i
+		path=/var/lib/lxc/$host_name/rootfs
 
-	#This file will be created in base machine's home dir
-	echo "$ip $host_name" >> hosts
+		#create compute node filesystem
+		echo
+		echo "1. Creating $host_name Filesystem"
+        	lxc-create -t mpi-worker -n $host_name || ownerr "Failed to create $host_name FS."
 
-	#Add ip and hostname to existing nodes array	
-	nodes=("${nodes[@]}" "$ip" "$host_name")
-	echo ${nodes[@]}
-done
+		#preapre xml of container
+		echo
+		echo "2. Copying base.xml.."
+        	sudo cp base.xml $host_name.xml || ownerr "failed to copy base.xml"
+        	sed -i "s/NAME/$host_name/" $host_name.xml
+        	sed -i "s<ROOT<$path<" $host_name.xml
+		
+		#Define xml for compute node
+	        echo
+		echo "3. Defining $host_name domain with virsh.."
+		virsh -c lxc:/// define $host_name.xml || ownerr "Failed to define $host_name"
 
-##Edit master and compute node filesystem for setting up /etc/hosts file
-for ((i=1;i<=${#nodes[@]};i=i+2)) 
-do
-	path=/var/lib/lxc/${nodes[i]}/rootfs/
-	echo "your for loop path is $path"
-	cat hosts >> $path/etc/hosts
-done
+
+		#start the container
+		echo
+        	echo "4. Starting $host_name container....."
+        	virsh -c lxc:/// start $host_name || ownerr "failed to start $host_name conatainer"
+
+        	#list current containers
+        	echo
+	        echo "Cureently running containers...."
+        	virsh -c lxc:/// list --all
+        	sleep 13
+
+		#Find IP of master node container - using master node filesystem -In bridge mode
+		#ip=$(tail -n15 $path/var/lib/dhcp/dhclient.eth0.leases | grep fixed-address | cut -d" " -f4 | cut -d";" -f1)
+        	#echo "IP of master node is $ip"
+        	#Find the IP of container - using dnsmasq
+        	#ip=$(cat /var/lib/libvirt/dnsmasq/default.leases | grep $2 |cut -d" " -f3)
+        	ip=$(cat /var/lib/libvirt/dnsmasq/default.leases | grep $host_name | awk '{print $3}')
+		echo "IP of $host_name is $ip"
+
+
+ 	       	#Add ip and hostname to existing nodes array    
+        	nodes=("${nodes[@]}" "$ip" "$host_name")
+        	echo "Array is ${nodes[@]}"
+	
+	 	#This file will be created in base machine's home dir
+         	echo "$ip $host_name" >> hosts
+	done
+}
+
+function create_hosts
+{
+	##Edit master and compute node filesystem for setting up /etc/hosts file
+	for ((i=1;i<=${#nodes[@]};i=i+2)) 
+	do
+	        path=/var/lib/lxc/${nodes[i]}/rootfs/
+	        echo "your for loop path is $path"
+        	sudo sh -c "cat hosts >> $path/etc/hosts"
+	done
+}
+
+
+#Global Variables ----from here
+ms_path=/var/lib/lxc/master/rootfs
+
+#Call various func --- from here
+
+echo "**************************************Welcome to Rapid HPC***********************************************************"
+echo
+echo
+
+# 1)Check for sudo privilege
+check_root
+
+# 2) Install necessary packages
+install_pkg
+
+# 3) Download Required stuff
+download_fs
+
+# 4) Create MPI master node
+create_mpi_master $ms_path
+
+# 5) Create MPI worker node
+create_mpi_worker
+
+# 6) Create /etc/hpsts in master and compute
+create_hosts
