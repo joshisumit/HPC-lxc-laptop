@@ -26,6 +26,12 @@ Everthing will be installed automatically by script.
   - IP : 192.168.122.154
 
 
+### Note: 
+
+U can login to master/compute1/compute2/compute3 with username:`ubuntu` and password:`ubuntu`
+
+All nodes has `cluster` user which is used for running MPI application
+
 
 ## So, How to Set it up?
 
